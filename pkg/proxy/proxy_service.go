@@ -39,6 +39,7 @@ type checker struct {
 	isAlive        *atomic.Bool
 	localProxyHost string
 	isDebug        bool
+	parsedProxyURL *url.URL
 }
 
 func NewService(proxyHost string, log logger.Logger, isDebug bool) (Service, error) {
@@ -53,6 +54,7 @@ func NewService(proxyHost string, log logger.Logger, isDebug bool) (Service, err
 	if parsedURL, err := url.Parse(proxyHost); err != nil {
 		return nil, errors.Wrapf(err, "failed to parse proxy host")
 	} else if parsedURL.User != nil {
+		c.parsedProxyURL = parsedURL
 		c.proxyUsername = parsedURL.User.Username()
 		c.proxyPassword, _ = parsedURL.User.Password()
 	}
@@ -99,6 +101,9 @@ func (c *checker) Start(ctx context.Context) {
 				authorization := c.proxyAuthorization()
 				req.Header.Set("Proxy-Authorization", authorization)
 			})
+			if c.parsedProxyURL != nil {
+				httpProxy.Tr = &http.Transport{Proxy: http.ProxyURL(c.parsedProxyURL)}
+			}
 			httpProxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 				authorization := c.proxyAuthorization()
 				req.Header.Set("Proxy-Authorization", authorization)
