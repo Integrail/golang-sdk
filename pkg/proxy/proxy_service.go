@@ -99,6 +99,11 @@ func (c *checker) Start(ctx context.Context) {
 				authorization := c.proxyAuthorization()
 				req.Header.Set("Proxy-Authorization", authorization)
 			})
+			httpProxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+				authorization := c.proxyAuthorization()
+				req.Header.Set("Proxy-Authorization", authorization)
+				return req, nil
+			})
 			freePort := listener.Addr().(*net.TCPAddr).Port
 			_ = listener.Close()
 			c.localProxyHost = fmt.Sprintf("localhost:%d", freePort)
