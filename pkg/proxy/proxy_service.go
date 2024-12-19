@@ -12,7 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/proxy"
+
 	"github.com/elazarl/goproxy"
+	"github.com/integrail/golang-sdk/pkg/socks5_server"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/simple-container-com/go-aws-lambda-sdk/pkg/logger"
@@ -40,6 +43,7 @@ type checker struct {
 	localProxyHost string
 	isDebug        bool
 	parsedProxyURL *url.URL
+	scheme         string
 }
 
 func NewService(proxyHost string, log logger.Logger, isDebug bool) (Service, error) {
@@ -51,13 +55,18 @@ func NewService(proxyHost string, log logger.Logger, isDebug bool) (Service, err
 		isAlive:   isAlive,
 		isDebug:   isDebug,
 	}
-	if parsedURL, err := url.Parse(proxyHost); err != nil {
+	parsedURL, err := url.Parse(proxyHost)
+	if err != nil {
 		return nil, errors.Wrapf(err, "failed to parse proxy host")
-	} else if parsedURL.User != nil {
-		c.parsedProxyURL = parsedURL
+	}
+	if parsedURL.User != nil {
 		c.proxyUsername = parsedURL.User.Username()
 		c.proxyPassword, _ = parsedURL.User.Password()
 	}
+	c.scheme = parsedURL.Scheme
+	c.parsedProxyURL = parsedURL
+
+	log.Infof(context.Background(), "starting to proxy requests to proxy of type %q", c.scheme)
 	return c, nil
 }
 
@@ -89,37 +98,96 @@ func (c *checker) Start(ctx context.Context) {
 	})
 
 	if c.proxyUsername != "" && c.proxyPassword != "" {
-		errG.Go(func() error {
-			httpProxy := goproxy.NewProxyHttpServer()
-			httpProxy.Verbose = c.isDebug
-			listener, err := net.Listen("tcp", ":0")
-			if err != nil {
-				c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "failed to get free port")
-				return errors.Wrapf(err, "failed to get free port")
+		startProxyFunc := func() error {
+			return c.startHttpProxy(ctx)
+		}
+		if c.scheme != "http" {
+			startProxyFunc = func() error {
+				return c.startSocksProxy(ctx)
 			}
-			httpProxy.ConnectDial = httpProxy.NewConnectDialToProxyWithHandler(c.proxyHost, func(req *http.Request) {
-				authorization := c.proxyAuthorization()
-				req.Header.Set("Proxy-Authorization", authorization)
-			})
-			if c.parsedProxyURL != nil {
-				httpProxy.Tr = &http.Transport{Proxy: http.ProxyURL(c.parsedProxyURL)}
-			}
-			httpProxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-				authorization := c.proxyAuthorization()
-				req.Header.Set("Proxy-Authorization", authorization)
-				return req, nil
-			})
-			freePort := listener.Addr().(*net.TCPAddr).Port
-			_ = listener.Close()
-			c.localProxyHost = fmt.Sprintf("localhost:%d", freePort)
-			c.log.Infof(ctx, "starting local proxy server at %s", c.localProxyHost)
-			if err := http.ListenAndServe(c.localProxyHost, httpProxy); err != nil {
-				c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "failed to start proxy-proxy-proxy server")
-				return errors.Wrapf(err, "failed to start proxy for proxy for proxy")
-			}
-			return nil
-		})
+		}
+		errG.Go(startProxyFunc)
 	}
+}
+
+func (c *checker) startSocksProxy(ctx context.Context) error {
+	freePort, err := c.getFreePort(ctx)
+	if err != nil {
+		return err
+	}
+	var serverAddr *net.TCPAddr
+	if addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%d", freePort)); err != nil {
+		return err
+	} else {
+		serverAddr = addr
+	}
+	c.localProxyHost = fmt.Sprintf("socks5://localhost:%d", freePort)
+	server := socks5_server.NewServer()
+	server.EnableUDP()
+	server.SetDialerInitFunc(func(r *socks5_server.Request) proxy.Dialer {
+		var auth *proxy.Auth
+		if c.proxyUsername != "" && c.proxyPassword != "" {
+			auth = &proxy.Auth{
+				User:     c.proxyUsername,
+				Password: c.proxyPassword,
+			}
+		}
+		dialer, err := proxy.SOCKS5("tcp", c.parsedProxyURL.Host, auth, &net.Dialer{
+			Timeout:   60 * time.Second,
+			KeepAlive: 30 * time.Second,
+		})
+		if err != nil {
+			c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "failed to init socks5 dialer")
+		}
+		return dialer
+	})
+
+	if err := server.Run(serverAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *checker) startHttpProxy(ctx context.Context) error {
+	httpProxy := goproxy.NewProxyHttpServer()
+	httpProxy.Verbose = c.isDebug
+	freePort, err := c.getFreePort(ctx)
+	if err != nil {
+		return err
+	}
+
+	httpProxy.ConnectDial = httpProxy.NewConnectDialToProxyWithHandler(c.proxyHost, func(req *http.Request) {
+		authorization := c.proxyAuthorization()
+		req.Header.Set("Proxy-Authorization", authorization)
+	})
+	if c.parsedProxyURL != nil {
+		httpProxy.Tr = &http.Transport{Proxy: http.ProxyURL(c.parsedProxyURL)}
+	}
+	httpProxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		authorization := c.proxyAuthorization()
+		req.Header.Set("Proxy-Authorization", authorization)
+		return req, nil
+	})
+	c.localProxyHost = fmt.Sprintf("localhost:%d", freePort)
+	c.log.Infof(ctx, "starting local proxy server at %s", c.localProxyHost)
+	if err := http.ListenAndServe(c.localProxyHost, httpProxy); err != nil {
+		c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "failed to start proxy-proxy-proxy server")
+		return errors.Wrapf(err, "failed to start proxy for proxy for proxy")
+	}
+	return nil
+}
+
+func (c *checker) getFreePort(ctx context.Context) (int, error) {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "failed to get free port")
+		return 0, errors.Wrapf(err, "failed to get free port")
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+	freePort := listener.Addr().(*net.TCPAddr).Port
+	return freePort, nil
 }
 
 func (c *checker) IsAlive() bool {
@@ -127,6 +195,41 @@ func (c *checker) IsAlive() bool {
 }
 
 func (c *checker) checkAlive(ctx context.Context) error {
+	if c.scheme == "http" {
+		return c.checkAliveHttp(ctx)
+	}
+	return c.checkAliveSocks(ctx)
+}
+
+func (c *checker) checkAliveSocks(ctx context.Context) error {
+	//var auth *proxy.Auth
+	//if c.proxyUsername != "" && c.proxyPassword != "" {
+	//	auth = &proxy.Auth{User: c.proxyUsername, Password: c.proxyPassword}
+	//}
+	//dialer, err := proxy.SOCKS5("tcp", c.parsedProxyURL.Host, auth, &net.Dialer{
+	//	Timeout:   60 * time.Second,
+	//	KeepAlive: 30 * time.Second,
+	//})
+	//if err != nil {
+	//	return errors.Wrapf(err, "failed to init socks5 dialer")
+	//}
+	dialer := net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 5 * time.Second,
+	}
+	conn, err := dialer.Dial("tcp", c.parsedProxyURL.Host)
+	if conn != nil {
+		defer func(conn net.Conn) {
+			_ = conn.Close()
+		}(conn)
+	}
+	if err != nil {
+		return errors.Wrapf(err, "failed to dial %s", c.parsedProxyURL.Host)
+	}
+	return nil
+}
+
+func (c *checker) checkAliveHttp(ctx context.Context) error {
 	client := &http.Client{Timeout: time.Second * 8}
 
 	proxyHost := c.proxyHost
