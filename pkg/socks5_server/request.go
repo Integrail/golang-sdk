@@ -1,6 +1,7 @@
 package socks5_server
 
 import (
+	"context"
 	"encoding/binary"
 	"net"
 	"time"
@@ -54,6 +55,10 @@ func (r *Request) Process() {
 		return
 	}
 
+	ctx := r.server.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !r.tcpGram.viaUDP { // tcp
 
 		timeout := time.Second * time.Duration(r.server.writeTimeoutSecond)
@@ -63,6 +68,9 @@ func (r *Request) Process() {
 		}
 		// answer bind addr
 		if conn, err := dialer.Dial("tcp", r.tcpGram.networkString()); err != nil {
+			if r.server.log != nil {
+				r.server.log.Errorf(r.server.log.WithValue(ctx, "error", err.Error()), "failed to init socks5 dialer")
+			}
 			_, _ = r.ClientConn.Write([]byte{Version, 0x04, 0x00, ATYPIPv4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 			return
 		} else {

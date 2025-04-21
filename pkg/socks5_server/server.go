@@ -1,9 +1,12 @@
 package socks5_server
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
+
+	"github.com/simple-container-com/go-aws-lambda-sdk/pkg/logger"
 )
 
 func NewServer() *server {
@@ -20,11 +23,18 @@ type server struct {
 	readTimeoutSecond  uint // default 600
 	writeTimeoutSecond uint // default 30
 	headRequest        *requestList
+	log                logger.Logger
+	ctx                context.Context
 
 	authHandle        AuthHandle
 	onConnectedHandle OnConnectedHandle
 	onStartedHandle   OnStartedHandle
 	dialerInitFunc    DialerInitFunc
+}
+
+func (s *server) SetLogger(ctx context.Context, log logger.Logger) {
+	s.ctx = ctx
+	s.log = log
 }
 
 func (s *server) SetAuthHandle(handle AuthHandle) {
