@@ -11,20 +11,31 @@ import (
 
 type ObservatorySink struct {
 	baseUri string
+	apiKey  string
 }
 
-func NewObservatorySink(baseUri string) *ObservatorySink {
+func NewObservatorySink(baseUri string, apiKey string) *ObservatorySink {
 	return &ObservatorySink{
 		baseUri: baseUri,
+		apiKey:  apiKey,
 	}
 }
 
 func (s *ObservatorySink) Write(msg logger.Message) error {
+	var logLevel int
+	switch msg.Level {
+	case logger.Error:
+		logLevel = 1
+	case logger.Warn:
+		logLevel = 2
+	case logger.Info:
+		logLevel = 3
+	}
 	body := ObservatoryPushLogsRequest{
 		Logs: []ObservatoryPushLogsRequestLog{
 			{
 				Message:   msg.Message,
-				LogLevel:  msg.Level,
+				LogLevel:  logLevel,
 				Data:      msg.Context,
 				Module:    nil,
 				Submodule: nil,
@@ -37,7 +48,16 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 	}
 
 	url := fmt.Sprintf("%s/api/v1/observatory/logs", s.baseUri)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("Error creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.apiKey))
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send observatory log message: %w", err)
 	}
@@ -55,7 +75,7 @@ type ObservatoryPushLogsRequest struct {
 
 type ObservatoryPushLogsRequestLog struct {
 	Message   string  `json:"message"`
-	LogLevel  string  `json:"logLevel"`
+	LogLevel  int     `json:"logLevel"`
 	Data      any     `json:"data"`
 	Module    *string `json:"module"`
 	Submodule *string `json:"submodule"`
