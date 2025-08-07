@@ -18,5 +18,5 @@ func WithExecutionCtx(l logger.Logger, ctx context.Context, req http.Request) co
 		l.Errorf(ctx, "Failed to unmarshal execution context: %v", err)
 		return ctx
 	}
-	return context.WithValue(ctx, "executionCtx", executionCtx)
+	return l.WithValue(ctx, "executionCtx", executionCtx)
 }
