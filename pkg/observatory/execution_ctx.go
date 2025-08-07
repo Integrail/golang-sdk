@@ -8,7 +8,7 @@ import (
 	"github.com/simple-container-com/go-aws-lambda-sdk/pkg/logger"
 )
 
-func WithExecutionCtx(l logger.Logger, ctx context.Context, req http.Request) context.Context {
+func WithExecutionCtx(l logger.Logger, ctx context.Context, req *http.Request) context.Context {
 	executionCtxJson := req.Header.Get("X-Everworker-Execution-Context")
 	if executionCtxJson == "" {
 		return ctx
