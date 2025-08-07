@@ -31,6 +31,7 @@ func NewObservatorySink(apiKey string, bufferSize int, flushDelay time.Duration)
 		apiKey:     apiKey,
 		bufferSize: bufferSize,
 		flushDelay: flushDelay,
+		buffers:    make(map[string]*ObservatorySinkBuffer),
 	}
 
 	ticker := time.NewTicker(flushDelay)
