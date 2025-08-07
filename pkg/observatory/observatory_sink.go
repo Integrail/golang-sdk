@@ -46,24 +46,24 @@ func NewObservatorySink(apiKey string, bufferSize int, flushDelay time.Duration)
 
 func (s *ObservatorySink) Write(msg logger.Message) error {
 	ctxValue := logger.ContextValue(msg.Context)
-	everworkerCtx := ctxValue["executionCtx"].(map[string]any)
+	everworkerCtx := ctxValue["executionCtx"]
 	if everworkerCtx == nil {
 		return nil
 	}
-	everworkerUrl := everworkerCtx["everworkerUrl"].(string)
-	if everworkerUrl == "" {
+	everworkerUrl := everworkerCtx.(map[string]any)["everworkerUrl"]
+	if everworkerUrl == nil {
 		return nil
 	}
 
 	s.mutex.Lock()
-	if s.buffers[everworkerUrl] == nil {
-		s.buffers[everworkerUrl] = &ObservatorySinkBuffer{
+	if s.buffers[everworkerUrl.(string)] == nil {
+		s.buffers[everworkerUrl.(string)] = &ObservatorySinkBuffer{
 			messages: make([]logger.Message, 0, s.bufferSize),
 		}
 	}
 	s.mutex.Unlock()
 
-	buffer := s.buffers[everworkerUrl]
+	buffer := s.buffers[everworkerUrl.(string)]
 	buffer.mutex.Lock()
 	defer buffer.mutex.Unlock()
 
