@@ -12,13 +12,12 @@ import (
 )
 
 type ObservatorySinkBuffer struct {
-	messages []logger.Message
-	mutex    sync.Mutex
+	observatoryToken string
+	messages         []logger.Message
+	mutex            sync.Mutex
 }
 
 type ObservatorySink struct {
-	apiKey string
-
 	bufferSize int
 	flushTimer *time.Timer
 	flushDelay time.Duration
@@ -26,9 +25,8 @@ type ObservatorySink struct {
 	mutex      sync.Mutex
 }
 
-func NewObservatorySink(apiKey string, bufferSize int, flushDelay time.Duration) *ObservatorySink {
+func NewObservatorySink(bufferSize int, flushDelay time.Duration) *ObservatorySink {
 	s := &ObservatorySink{
-		apiKey:     apiKey,
 		bufferSize: bufferSize,
 		flushDelay: flushDelay,
 		buffers:    make(map[string]*ObservatorySinkBuffer),
@@ -55,12 +53,18 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 		return nil
 	}
 
+	observatoryToken := everworkerCtx.(map[string]any)["observatoryToken"]
+	if observatoryToken == nil {
+		return fmt.Errorf("observatory token not found in context")
+	}
+
 	s.mutex.Lock()
 	if s.buffers[everworkerUrl.(string)] == nil {
 		s.buffers[everworkerUrl.(string)] = &ObservatorySinkBuffer{
-			messages: make([]logger.Message, 0, s.bufferSize),
+			messages:         make([]logger.Message, 0, s.bufferSize),
 		}
 	}
+	s.buffers[everworkerUrl.(string)].observatoryToken = observatoryToken.(string)
 	s.mutex.Unlock()
 
 	buffer := s.buffers[everworkerUrl.(string)]
@@ -72,7 +76,7 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 	return nil
 }
 
-func (s *ObservatorySink) writeImmediately(everworkerUrl string, msgs []logger.Message) error {
+func (s *ObservatorySink) writeImmediately(everworkerUrl string, observatoryToken string, msgs []logger.Message) error {
 	body := ObservatoryPushLogsRequest{
 		Logs: make([]ObservatoryPushLogsRequestLog, len(msgs)),
 	}
@@ -106,7 +110,7 @@ func (s *ObservatorySink) writeImmediately(everworkerUrl string, msgs []logger.M
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.apiKey))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", observatoryToken))
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -130,7 +134,7 @@ func (s *ObservatorySink) flush() error {
 			return nil
 		}
 
-		if err := s.writeImmediately(key, buffer.messages); err != nil {
+		if err := s.writeImmediately(key, buffer.observatoryToken, buffer.messages); err != nil {
 			return fmt.Errorf("failed to write buffered messages to %s: %w", key, err)
 		}
 
