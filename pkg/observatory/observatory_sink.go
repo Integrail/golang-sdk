@@ -11,49 +11,72 @@ import (
 	"github.com/simple-container-com/go-aws-lambda-sdk/pkg/logger"
 )
 
-type ObservatorySink struct {
-	baseUri string
-	apiKey  string
+type ObservatorySinkBuffer struct {
+	observatoryToken string
+	messages         []logger.Message
+	mutex            sync.Mutex
+}
 
+type ObservatorySink struct {
 	bufferSize int
 	flushTimer *time.Timer
 	flushDelay time.Duration
-	buffer     []logger.Message
+	buffers    map[string]*ObservatorySinkBuffer
 	mutex      sync.Mutex
 }
 
-func NewObservatorySink(baseUri string, apiKey string, bufferSize int, flushDelay time.Duration) *ObservatorySink {
-	return &ObservatorySink{
-		baseUri:    baseUri,
-		apiKey:     apiKey,
+func NewObservatorySink(bufferSize int, flushDelay time.Duration) *ObservatorySink {
+	s := &ObservatorySink{
 		bufferSize: bufferSize,
 		flushDelay: flushDelay,
+		buffers:    make(map[string]*ObservatorySinkBuffer),
 	}
+
+	ticker := time.NewTicker(flushDelay)
+	go func() {
+		for range ticker.C {
+			s.flush()
+		}
+	}()
+
+	return s
 }
 
 func (s *ObservatorySink) Write(msg logger.Message) error {
+	ctxValue := logger.ContextValue(msg.Context)
+	everworkerCtx := ctxValue["executionCtx"]
+	if everworkerCtx == nil {
+		return nil
+	}
+	everworkerUrl := everworkerCtx.(map[string]any)["everworkerUrl"]
+	if everworkerUrl == nil {
+		return nil
+	}
+
+	observatoryToken := everworkerCtx.(map[string]any)["observatoryToken"]
+	if observatoryToken == nil {
+		return fmt.Errorf("observatory token not found in context")
+	}
+
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	s.buffer = append(s.buffer, msg)
-
-	// Reset flush timer
-	if s.flushTimer != nil {
-		s.flushTimer.Stop()
+	if s.buffers[everworkerUrl.(string)] == nil {
+		s.buffers[everworkerUrl.(string)] = &ObservatorySinkBuffer{
+			messages: make([]logger.Message, 0, s.bufferSize),
+		}
 	}
-	s.flushTimer = time.AfterFunc(s.flushDelay, func() {
-		s.Flush()
-	})
+	s.buffers[everworkerUrl.(string)].observatoryToken = observatoryToken.(string)
+	s.mutex.Unlock()
 
-	// Flush if buffer is full
-	if len(s.buffer) >= s.bufferSize {
-		return s.flush()
-	}
+	buffer := s.buffers[everworkerUrl.(string)]
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+
+	buffer.messages = append(buffer.messages, msg)
 
 	return nil
 }
 
-func (s *ObservatorySink) WriteImmediately(msgs []logger.Message) error {
+func (s *ObservatorySink) writeImmediately(everworkerUrl string, observatoryToken string, msgs []logger.Message) error {
 	body := ObservatoryPushLogsRequest{
 		Logs: make([]ObservatoryPushLogsRequestLog, len(msgs)),
 	}
@@ -80,14 +103,14 @@ func (s *ObservatorySink) WriteImmediately(msgs []logger.Message) error {
 		return fmt.Errorf("failed to marshal observatory log message: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/observatory/logs", s.baseUri)
+	url := fmt.Sprintf("%s/api/v1/observatory/logs", everworkerUrl)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("Error creating request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.apiKey))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", observatoryToken))
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -102,27 +125,24 @@ func (s *ObservatorySink) WriteImmediately(msgs []logger.Message) error {
 	return nil
 }
 
-func (s *ObservatorySink) Flush() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.flush()
-}
-
 func (s *ObservatorySink) flush() error {
-	if len(s.buffer) == 0 {
-		return nil
-	}
+	for key, buffer := range s.buffers {
+		if buffer == nil {
+			continue
+		}
+		buffer.mutex.Lock()
+		defer buffer.mutex.Unlock()
 
-	if err := s.WriteImmediately(s.buffer); err != nil {
-		return fmt.Errorf("failed to write buffered messages: %w", err)
-	}
+		if len(buffer.messages) == 0 {
+			return nil
+		}
 
-	// Clear buffer
-	s.buffer = s.buffer[:0]
+		if err := s.writeImmediately(key, buffer.observatoryToken, buffer.messages); err != nil {
+			return fmt.Errorf("failed to write buffered messages to %s: %w", key, err)
+		}
 
-	if s.flushTimer != nil {
-		s.flushTimer.Stop()
-		s.flushTimer = nil
+		// Clear buffer
+		buffer.messages = buffer.messages[:0]
 	}
 
 	return nil
