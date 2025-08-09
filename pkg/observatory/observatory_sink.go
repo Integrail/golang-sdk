@@ -14,14 +14,14 @@ import (
 type ObservatorySinkBuffer struct {
 	observatoryToken string
 	messages         []logger.Message
-	mutex            sync.Mutex
+	mutex            *sync.Mutex
 }
 
 type ObservatorySink struct {
 	bufferSize int
 	flushTimer *time.Timer
 	flushDelay time.Duration
-	buffers    map[string]*ObservatorySinkBuffer
+	buffers    map[string]ObservatorySinkBuffer
 	mutex      sync.Mutex
 }
 
@@ -29,7 +29,7 @@ func NewObservatorySink(bufferSize int, flushDelay time.Duration) *ObservatorySi
 	s := &ObservatorySink{
 		bufferSize: bufferSize,
 		flushDelay: flushDelay,
-		buffers:    make(map[string]*ObservatorySinkBuffer),
+		buffers:    make(map[string]ObservatorySinkBuffer),
 	}
 
 	ticker := time.NewTicker(flushDelay)
@@ -59,15 +59,19 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 	}
 
 	s.mutex.Lock()
-	if s.buffers[everworkerUrl.(string)] == nil {
-		s.buffers[everworkerUrl.(string)] = &ObservatorySinkBuffer{
+	buffer, exists := s.buffers[everworkerUrl.(string)]
+	if !exists {
+		buffer = ObservatorySinkBuffer{
+			observatoryToken: observatoryToken.(string),
 			messages:         make([]logger.Message, 0, s.bufferSize),
+			mutex:            new(sync.Mutex),
 		}
+	} else {
+		buffer.observatoryToken = observatoryToken.(string)
 	}
-	s.buffers[everworkerUrl.(string)].observatoryToken = observatoryToken.(string)
+	s.buffers[everworkerUrl.(string)] = buffer
 	s.mutex.Unlock()
 
-	buffer := s.buffers[everworkerUrl.(string)]
 	buffer.mutex.Lock()
 	defer buffer.mutex.Unlock()
 
