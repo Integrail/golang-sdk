@@ -14,14 +14,14 @@ import (
 type ObservatorySinkBuffer struct {
 	observatoryToken string
 	messages         []logger.Message
-	mutex            *sync.Mutex
+	mutex            sync.Mutex
 }
 
 type ObservatorySink struct {
 	bufferSize int
 	flushTimer *time.Timer
 	flushDelay time.Duration
-	buffers    map[string]ObservatorySinkBuffer
+	buffers    map[string]*ObservatorySinkBuffer
 	mutex      sync.Mutex
 }
 
@@ -29,7 +29,7 @@ func NewObservatorySink(bufferSize int, flushDelay time.Duration) *ObservatorySi
 	s := &ObservatorySink{
 		bufferSize: bufferSize,
 		flushDelay: flushDelay,
-		buffers:    make(map[string]ObservatorySinkBuffer),
+		buffers:    make(map[string]*ObservatorySinkBuffer),
 	}
 
 	ticker := time.NewTicker(flushDelay)
@@ -58,24 +58,16 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 		return fmt.Errorf("observatory token not found in context")
 	}
 
-	fmt.Printf("::: before s.mutex.Lock()\n")
 	s.mutex.Lock()
-	fmt.Printf("::: after s.mutex.Lock()\n")
-	buffer, exists := s.buffers[everworkerUrl.(string)]
-	if !exists {
-		buffer = ObservatorySinkBuffer{
-			observatoryToken: observatoryToken.(string),
-			messages:         make([]logger.Message, 0, s.bufferSize),
-			mutex:            new(sync.Mutex),
+	if s.buffers[everworkerUrl.(string)] == nil {
+		s.buffers[everworkerUrl.(string)] = &ObservatorySinkBuffer{
+			messages: make([]logger.Message, 0, s.bufferSize),
 		}
-	} else {
-		buffer.observatoryToken = observatoryToken.(string)
 	}
-	s.buffers[everworkerUrl.(string)] = buffer
-	fmt.Printf("::: before s.mutex.Unlock()\n")
+	s.buffers[everworkerUrl.(string)].observatoryToken = observatoryToken.(string)
 	s.mutex.Unlock()
 
-	fmt.Printf("::: before buffer.mutex.Lock()\n")
+	buffer := s.buffers[everworkerUrl.(string)]
 	buffer.mutex.Lock()
 	defer buffer.mutex.Unlock()
 
@@ -135,14 +127,15 @@ func (s *ObservatorySink) writeImmediately(everworkerUrl string, observatoryToke
 
 func (s *ObservatorySink) flush() error {
 	for key, buffer := range s.buffers {
+		if buffer == nil {
+			continue
+		}
 		buffer.mutex.Lock()
 		defer buffer.mutex.Unlock()
 
 		if len(buffer.messages) == 0 {
-			fmt.Printf("::: no messages to flush\n")
 			return nil
 		}
-		fmt.Printf("::: flushing %d messages\n", len(buffer.messages))
 
 		if err := s.writeImmediately(key, buffer.observatoryToken, buffer.messages); err != nil {
 			return fmt.Errorf("failed to write buffered messages to %s: %w", key, err)
