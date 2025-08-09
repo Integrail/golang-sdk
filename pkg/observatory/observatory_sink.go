@@ -58,7 +58,9 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 		return fmt.Errorf("observatory token not found in context")
 	}
 
+	fmt.Printf("::: before s.mutex.Lock()\n")
 	s.mutex.Lock()
+	fmt.Printf("::: after s.mutex.Lock()\n")
 	buffer, exists := s.buffers[everworkerUrl.(string)]
 	if !exists {
 		buffer = ObservatorySinkBuffer{
@@ -70,8 +72,10 @@ func (s *ObservatorySink) Write(msg logger.Message) error {
 		buffer.observatoryToken = observatoryToken.(string)
 	}
 	s.buffers[everworkerUrl.(string)] = buffer
+	fmt.Printf("::: before s.mutex.Unlock()\n")
 	s.mutex.Unlock()
 
+	fmt.Printf("::: before buffer.mutex.Lock()\n")
 	buffer.mutex.Lock()
 	defer buffer.mutex.Unlock()
 
