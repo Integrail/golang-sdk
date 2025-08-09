@@ -139,8 +139,10 @@ func (s *ObservatorySink) flush() error {
 		defer buffer.mutex.Unlock()
 
 		if len(buffer.messages) == 0 {
+			fmt.Printf("::: no messages to flush\n")
 			return nil
 		}
+		fmt.Printf("::: flushing %d messages\n", len(buffer.messages))
 
 		if err := s.writeImmediately(key, buffer.observatoryToken, buffer.messages); err != nil {
 			return fmt.Errorf("failed to write buffered messages to %s: %w", key, err)
