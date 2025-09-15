@@ -107,8 +107,12 @@ func (m *mongodbMessageBus[T]) Send(ctx context.Context, sessionID string, evt T
 func (m *mongodbMessageBus[T]) OnMessage(ctx context.Context, sessionID string, onSubStarted func(), onMsgCallback func(evt T)) error {
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 
+	// Optimized pipeline: filter by sessionID at database level
 	cs, err := m.messages.Watch(ctx, mongo.Pipeline{
-		bson.D{bson.E{Key: "$match", Value: bson.D{bson.E{Key: "operationType", Value: "insert"}}}},
+		bson.D{bson.E{Key: "$match", Value: bson.D{
+			bson.E{Key: "operationType", Value: "insert"},
+			bson.E{Key: "fullDocument.sessionId", Value: sessionID},
+		}}},
 		bson.D{
 			bson.E{Key: "$project", Value: bson.M{"_id": 1, "fullDocument": 1, "ns": 1, "documentKey": 1}},
 		},
@@ -116,24 +120,37 @@ func (m *mongodbMessageBus[T]) OnMessage(ctx context.Context, sessionID string, 
 	if err != nil {
 		return err
 	}
+
+	defer func() {
+		if closeErr := cs.Close(context.Background()); closeErr != nil {
+			m.log.Errorf(m.log.WithValue(ctx, "error", closeErr.Error()), "failed to close change stream")
+		}
+	}()
+
+	onSubStarted()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return context.Canceled
 		default:
-			onSubStarted()
-			for cs.Next(ctx) {
+			if cs.Next(ctx) {
 				re := cs.Current.Index(1)
 				var message storedMessage
-				_ = bson.Unmarshal(re.Value().Value, &message)
-				if message.SessionID == sessionID {
-					var evt T
-					if err := json.Unmarshal([]byte(message.Message), &evt); err != nil {
-						m.log.Errorf(m.log.WithValue(ctx, "error", err.Error()), "failed to unmarshal event")
-					} else {
-						onMsgCallback(evt)
-					}
+				if err := bson.Unmarshal(re.Value().Value, &message); err != nil {
+					m.log.Errorf(m.log.WithValue(ctx, "error", err.Error()), "failed to unmarshal stored message")
+					continue
 				}
+
+				// Since we're filtering at database level, we know this message is for our session
+				var evt T
+				if err := json.Unmarshal([]byte(message.Message), &evt); err != nil {
+					m.log.Errorf(m.log.WithValue(ctx, "error", err.Error()), "failed to unmarshal event")
+				} else {
+					onMsgCallback(evt)
+				}
+			} else if err := cs.Err(); err != nil {
+				return errors.Wrapf(err, "change stream error for session %s", sessionID)
 			}
 		}
 	}
