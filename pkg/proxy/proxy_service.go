@@ -87,7 +87,9 @@ func (c *checker) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-ticker.C:
-				if err := c.checkAlive(ctx); err != nil {
+				if c.proxyHost == "" {
+					c.isAlive.Store(false)
+				} else if err := c.checkAlive(ctx); err != nil {
 					c.log.Errorf(c.log.WithValue(ctx, "error", err.Error()), "integrail proxy error")
 					c.isAlive.Store(false)
 				} else {
